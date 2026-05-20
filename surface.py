@@ -1,3 +1,11 @@
+"""
+Hand and generic ``Surface`` geometry for TouchSim.
+
+Loads the standard hand outline, region tags, graph-based distances between
+points, and uniform sampling of afferent locations. Exposes ``hand_surface``
+and ``null_surface`` singletons used by generators and transduction.
+"""
+
 import numpy as np
 import re
 import os.path

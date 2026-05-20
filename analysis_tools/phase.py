@@ -1,149 +1,28 @@
-"""
-Spike Phase Analysis Module
-===========================
-
-This module provides functions for analyzing neural spike train data,
-specifically for computing:
-    1. Mean firing rates from spike times
-    2. Continuous spike phase (unwrapped)
-    3. Synchrony indices between neural populations and stimuli
-
-Background
-----------
-When neurons fire action potentials (spikes), we can characterize their
-activity by:
-    - Firing rate: How many spikes per unit time
-    - Phase: Where in the firing cycle the neuron is at any given moment
-
-Phase-locking analysis examines whether neural firing is synchronized to
-an external stimulus (e.g., a vibrating probe at frequency f0).
-
-The key metric is the "vector strength" or "synchrony index" R, which
-measures how consistently spikes occur at a particular phase of the
-stimulus cycle. R ranges from 0 (no synchrony) to 1 (perfect synchrony).
-
-For m:n phase locking, we ask: do m cycles of neural activity align with
-n cycles of the stimulus? This generalizes simple 1:1 locking.
-
-Author: [Your name]
-Date: 2024
-"""
+"""Spike phase and m:n phase-locking / synchrony indices."""
 
 import numpy as np
 
-
-# =============================================================================
-# FIRING RATE COMPUTATION
-# =============================================================================
-
-def mean_firing(zz):
-    """
-    Compute mean firing rate for each neuron from spike times.
-
-    The firing rate is computed as:
-        FR = (N_spikes - 1) / (t_last - t_first)
-
-    This formula uses N-1 because we're counting inter-spike intervals (ISIs).
-    If there are N spikes, there are N-1 intervals between them.
-
-    Parameters
-    ----------
-    zz : list of 1D arrays
-        Each element is an array of spike times (in seconds) for one neuron.
-        Spike times should be sorted in ascending order.
-
-    Returns
-    -------
-    np.ndarray, shape (len(zz),)
-        Mean firing rate (Hz) for each neuron.
-        Returns 0 for neurons with fewer than 2 spikes.
-
-    Example
-    -------
-    >>> spikes = [np.array([0.1, 0.2, 0.3, 0.4])]  # 4 spikes over 0.3s
-    >>> mean_firing(spikes)
-    array([10.])  # (4-1) / 0.3 = 10 Hz
-
-    Notes
-    -----
-    - This is the "instantaneous" rate over the spiking support, not the
-      rate over a fixed window. This avoids edge effects from the recording
-      start/end times.
-    """
-    out_fr = []
-    for s in zz:
-        s = np.asarray(s, float)
-
-        # Need at least 2 spikes to compute a rate
-        if s.size > 1:
-            dt_support = s[-1] - s[0]  # Duration from first to last spike
-        else:
-            dt_support = 0
-
-        if dt_support > 0:
-            # N-1 intervals between N spikes
-            fr = (s.size - 1) / dt_support
-        else:
-            fr = 0
-
-        out_fr.append(fr)
-
-    return np.asarray(out_fr, float)
-
-
-# =============================================================================
-# SPIKE PHASE COMPUTATION
-# =============================================================================
 
 def spike_phase(zz, t):
     """
     Compute continuous (unwrapped) spike phase for each neuron.
 
-    The spike phase represents "where" in its firing cycle a neuron is at
-    each time point. This is useful for comparing neural activity to an
-    external stimulus phase.
-
-    Method
-    ------
-    For each neuron, we linearly interpolate between consecutive spikes:
-        - At spike k, phase = 2*pi*k
-        - At spike k+1, phase = 2*pi*(k+1)
-        - Between spikes, phase increases linearly
-
-    This gives an "unwrapped" phase that continuously increases (rather
-    than wrapping around at 2*pi).
+    Linearly interpolates phase between consecutive spikes (2*pi per ISI).
+    Neurons with fewer than 2 spikes are omitted.
 
     Parameters
     ----------
     zz : list of 1D arrays
-        Spike times (sorted) for each neuron.
+        Spike times per neuron.
     t : 1D array
-        Evaluation times at which to compute phase.
+        Times at which to evaluate phase [s].
 
     Returns
     -------
     phi : ndarray, shape (n_valid, len(t))
-        Unwrapped spike phase [radians] for each valid neuron.
-        NaN where phase is undefined (outside the spiking support).
+        Unwrapped phase [rad]; NaN outside spiking support.
     fr : ndarray, shape (n_valid,)
-        Mean firing rate [Hz] for each valid neuron.
-
-    Notes
-    -----
-    - Neurons with fewer than 2 spikes are excluded from the output.
-    - Phase is NaN for times before the first spike or after the last spike.
-    - The ISI guard prevents division by zero if two spikes have identical
-      timestamps (which shouldn't happen in real data but can occur due to
-      numerical precision issues).
-
-    Example
-    -------
-    If a neuron fires at t = [0.0, 0.1, 0.2] seconds:
-        - At t=0.0: phi = 0
-        - At t=0.05: phi = pi (halfway to next spike)
-        - At t=0.1: phi = 2*pi
-        - At t=0.15: phi = 3*pi
-        - At t=0.2: phi = 4*pi
+        Mean firing rate [Hz] over spiking support.
     """
     t = np.asarray(t, float)
     out_phi = []
@@ -151,61 +30,31 @@ def spike_phase(zz, t):
 
     for s in zz:
         s = np.asarray(s, float)
-
-        # Need at least 2 spikes to define phase between them
         if s.size < 2:
             continue
 
-        # ----- Mean firing rate over spiking support -----
         dt_support = s[-1] - s[0]
         if dt_support > 0:
             fr = (s.size - 1) / dt_support
         else:
             fr = np.nan
 
-        # ----- Compute continuous spike phase -----
-        # For each time t, find which inter-spike interval it falls in
-        # searchsorted returns index where t would be inserted to maintain order
-        # Subtracting 1 gives the index of the spike just before time t
-        idx = np.searchsorted(s, t, side='right') - 1
-
-        # Valid times are those within the spiking support
-        # (not before first spike, not after last spike)
+        idx = np.searchsorted(s, t, side="right") - 1
         valid = (idx >= 0) & (idx < s.size - 1)
-
-        # Initialize phase array with NaN
         phi = np.full(t.shape, np.nan, dtype=float)
 
-        # ----- Linear interpolation within each ISI -----
-        # frac = fraction of the way through the current ISI
-        # ISI = inter-spike interval = time between consecutive spikes
         isi = s[idx[valid] + 1] - s[idx[valid]]
-
-        # IMPORTANT: Guard against zero ISI (duplicate spike times)
-        # This prevents division by zero errors
         isi_safe = np.where(isi > 0, isi, np.nan)
-
-        # Compute fractional position within ISI
         frac = (t[valid] - s[idx[valid]]) / isi_safe
-
-        # Phase = 2*pi * (spike_number + fraction)
-        # This gives unwrapped phase that increases continuously
         phi[valid] = 2 * np.pi * (idx[valid] + frac)
 
         out_phi.append(phi)
         out_fr.append(fr)
 
-    # Handle case of no valid neurons
     if not out_phi:
         return np.empty((0, t.size), float), np.empty((0,), float)
 
     return np.vstack(out_phi), np.asarray(out_fr, float)
-
-
-# =============================================================================
-# SINGLE-NEURON SYNCHRONY INDEX
-# =============================================================================
-
 def sync_index(phi, theta, m_max=100, n_max=100):
     """
     Compute per-neuron synchrony index, maximizing over m:n phase locking.

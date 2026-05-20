@@ -1,9 +1,43 @@
+"""
+Factory functions for afferent populations and tactile stimuli.
+
+All ``stim_*`` builders accept ``backend`` (default ``orig``) and forward it to
+``Stimulus``. ``transduction`` is a backward-compatible alias. Use ``affpop_*``
+helpers to place afferents on surfaces.
+"""
+
 import numpy as np
 from scipy import signal
 import random
 
-from .classes import Afferent,AfferentPopulation,Stimulus,RandomAfferent
+from .classes import Afferent,AfferentPopulation,Stimulus
 from .surface import Surface, hand_surface
+
+
+def _make_stimulus(trace, location, fs, pin_radius, backend=None, transduction=None):
+    """Build a Stimulus; ``backend`` (or alias ``transduction``) sets all pipeline steps."""
+    kwargs = dict(
+        trace=trace,
+        location=location,
+        fs=fs,
+        pin_radius=pin_radius,
+    )
+    if backend is not None:
+        kwargs["backend"] = backend
+    if transduction is not None:
+        kwargs["transduction"] = transduction
+    return Stimulus(**kwargs)
+
+
+def _backend_kwargs_from_args(args):
+    """Extract ``backend`` / ``transduction`` from a stim_* ``**args`` dict."""
+    kw = {}
+    if "backend" in args:
+        kw["backend"] = args.get("backend")
+    if "transduction" in args:
+        kw["transduction"] = args.get("transduction")
+    return kw
+
 
 default_params ={'dist':1.,
                  'max_extent':10.,
@@ -14,7 +48,7 @@ default_params ={'dist':1.,
                  'fs':5000.,
                  'ramp_len':0.05,
                  'ramp_type':'lin',
-                 'pin_radius':0.5,
+                 'pin_radius':2.5,
                  'pre_indent':0.,
                  'pad_len':0.,
                  'pins_per_mm':2}
@@ -205,6 +239,8 @@ def stim_sine(**args):
         pre_indent (float): static indentation throughout trial (default: 0.).
         pre_pad_len (float): duration of pre-stimulus zero-padding (default: 0.).
         post_pad_len (float): duration of post-stimulus zero-padding (default: 0.).
+        backend (str): Mechanical backend ('orig', 'cutoff', 'lag'; default: 'orig').
+            Alias: ``transduction``.
 
     Returns:
         Stimulus object.
@@ -234,7 +270,10 @@ def stim_sine(**args):
 
     trace += pre_indent
 
-    return Stimulus(trace=trace, location=loc, fs=fs, pin_radius=pin_radius)
+    return _make_stimulus(
+        trace=trace, location=loc, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 
 def stim_noise(**args):
@@ -283,7 +322,10 @@ def stim_noise(**args):
         trace = apply_pad(trace,pad_len=pad_len,fs=fs)
     trace += pre_indent
 
-    return Stimulus(trace=trace,location=loc,fs=fs,pin_radius=pin_radius)
+    return _make_stimulus(
+        trace=trace, location=loc, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 
 def stim_impulse(**args):
@@ -317,7 +359,10 @@ def stim_impulse(**args):
         trace = apply_pad(trace,pad_len=pad_len,fs=fs)
     trace += pre_indent
 
-    return Stimulus(trace=trace,location=loc,fs=fs,pin_radius=pin_radius)
+    return _make_stimulus(
+        trace=trace, location=loc, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 
 def stim_ramp(**args):
@@ -353,21 +398,36 @@ def stim_ramp(**args):
         trace = apply_pad(trace,pad_len=pad_len,fs=fs)
     trace += pre_indent
 
-    return Stimulus(trace=trace,location=loc,fs=fs,pin_radius=pin_radius)
+    return _make_stimulus(
+        trace=trace, location=loc, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 def stim_vcr(**args):
-    """Generates a 4-burst vCR stimulus across D2-D5 in random order.
+    """Generates a vCR burst sequence across selectable fingers.
 
     Kwargs:
         freq (float): carrier frequency in Hz.
         amp (float): burst amplitude in mm.
-        indent (float): baseline indentation in mm.
+        indent (float): baseline indentation in mm (default baseline for all active fingers).
         fs (float): sampling frequency in Hz (default: 5000).
         burst_len (float): burst duration in s (default: 0.100).
-        cycle_len (float): total 4-burst cycle length in s (default: 0.667).
+        cycle_len (float): reference cycle length in s for the baseline
+            100 ms burst design (default: 0.667).
+        base_burst_len (float): baseline burst duration used to derive pause
+            length from cycle_len (default: 0.100). Pauses remain fixed when
+            burst_len changes.
         delta (float): pulse window duration in s (default: 0.100).
         slope (float): tanh pulse slope (default: 1000).
         pin_radius (float): probe radius in mm (default: 0.5).
+        fingers (list[str]): active fingers (default: ["D2","D3","D4","D5"]).
+        order (None | "random" | list[int] | list[str]): firing order.
+            - None / "random": random permutation of active fingers (default behavior).
+            - list[int]: 0-based indices into `fingers`.
+            - list[str]: finger tags from `fingers`, e.g. ["D2","D3","D4","D5"].
+        indent_map (dict[str, float] | None): per-finger baseline indentation override.
+            Example: {"D2": 0.5, "D3": 0.0, "D4": 0.0, "D5": 0.0}
+        edge_pad_len: ignored; edge padding is fixed to inter-burst pause.
 
     Returns:
         Stimulus object.
@@ -378,26 +438,84 @@ def stim_vcr(**args):
     fs = args.get('fs', 5000)
     burst_len = args.get('burst_len', 0.100)
     cycle_len = args.get('cycle_len', 0.667)
-    delta = args.get('delta', 0.100)
+    base_burst_len = args.get('base_burst_len', 0.100)
+    # Match stim_burst behavior: default pulse window tracks burst_len.
+    delta = args.get('delta', burst_len)
     slope = args.get('slope', 1000)
     pin_radius = args.get('pin_radius', default_params['pin_radius'])
+    indenter_radius = args.get('indenter_radius', 2.5)
+    pins_per_mm = args.get('pins_per_mm', 2.0)
+    fingers = args.get('fingers', ['D2', 'D3', 'D4', 'D5'])
+    order = args.get('order', None)
+    indent_map = args.get('indent_map', None)
+    edge_pad_len = args.get('edge_pad_len', None)
     if freq is None or amp is None:
         raise ValueError("stim_vcr requires 'freq' and 'amp'.")
+    if type(fingers) is not list:
+        fingers = list(fingers)
+    fingers = [str(f).upper() for f in fingers]
+    valid = {"D1", "D2", "D3", "D4", "D5"}
+    if len(fingers) == 0:
+        raise ValueError("stim_vcr requires at least one finger in `fingers`.")
+    if len(set(fingers)) != len(fingers):
+        raise ValueError("stim_vcr `fingers` entries must be unique.")
+    if any(f not in valid for f in fingers):
+        raise ValueError(f"stim_vcr `fingers` must be in {sorted(valid)}")
+
+    # Resolve firing order as indices into `fingers`.
+    n_fingers = len(fingers)
+    if order is None or order == 'random':
+        fire_idx = np.random.permutation(n_fingers)
+    else:
+        if type(order) is not list:
+            order = list(order)
+        if len(order) != n_fingers:
+            raise ValueError("stim_vcr `order` must include each active finger exactly once.")
+        if all(isinstance(o, (int, np.integer)) for o in order):
+            fire_idx = np.asarray(order, dtype=int)
+            if np.any(fire_idx < 0) or np.any(fire_idx >= n_fingers):
+                raise ValueError("stim_vcr integer `order` entries out of range.")
+            if len(np.unique(fire_idx)) != n_fingers:
+                raise ValueError("stim_vcr integer `order` must be a permutation.")
+        else:
+            order_names = [str(o).upper() for o in order]
+            if set(order_names) != set(fingers):
+                raise ValueError("stim_vcr string `order` must be a permutation of `fingers`.")
+            fire_idx = np.asarray([fingers.index(name) for name in order_names], dtype=int)
+
+    # Per-finger baseline indentation; default to scalar `indent`.
+    base_indent = np.full(n_fingers, float(indent), dtype=float)
+    if indent_map is not None:
+        if not isinstance(indent_map, dict):
+            raise ValueError("stim_vcr `indent_map` must be a dict of {finger: indent_mm}.")
+        for k, v in indent_map.items():
+            kk = str(k).upper()
+            if kk in fingers:
+                base_indent[fingers.index(kk)] = float(v)
+
     dt = 1 / fs
-    t_pad = cycle_len / 4.0 - burst_len
+    # Keep inter-pulse pause fixed from the baseline design:
+    # pause = (cycle_len - n_fingers*base_burst_len) / n_fingers.
+    # Increasing burst_len then increases total sequence duration while
+    # preserving pause duration.
+    inter_pad = (cycle_len - n_fingers * base_burst_len) / max(n_fingers, 1)
+    if inter_pad < 0:
+        raise ValueError("stim_vcr requires cycle_len >= len(fingers) * base_burst_len.")
+    # Edge padding is fixed to inter-pulse pause.
+    edge_pad = inter_pad
     w = 2 * np.pi * freq
-    locs = [
-        ts.hand_surface.centers[ts.hand_surface.tag2idx('D2d')],
-        ts.hand_surface.centers[ts.hand_surface.tag2idx('D3d')],
-        ts.hand_surface.centers[ts.hand_surface.tag2idx('D4d')],
-        ts.hand_surface.centers[ts.hand_surface.tag2idx('D5d')],
-    ]
-    order = np.random.permutation(4)
-    t_max = 4 * burst_len + 5 * t_pad
+    center_locs = np.array(
+        [
+            np.asarray(hand_surface.centers[hand_surface.tag2idx(f"{f}d")], dtype=float).reshape(-1, 2)[0]
+            for f in fingers
+        ],
+        dtype=float,
+    )
+    t_max = n_fingers * burst_len + max(n_fingers - 1, 0) * inter_pad + 2 * edge_pad
     t = np.linspace(0.0, t_max, int(t_max / dt) + 1)
-    stim_traces = np.full((4, t.size), indent, dtype=float)
-    for j, fi in enumerate(order):
-        t_start = t_pad + j * (burst_len + t_pad)
+    stim_traces = np.tile(base_indent[:, None], (1, t.size))
+    for j, fi in enumerate(fire_idx):
+        t_start = edge_pad + j * (burst_len + inter_pad)
         t0 = t_start + burst_len / 2
         hf = 0.5 * (1 + np.cos(w * (t - t0)))
         pulse = (
@@ -405,12 +523,146 @@ def stim_vcr(**args):
             * (np.tanh(slope * (t - t0 + delta / 2))
                - np.tanh(slope * (t - t0 - delta / 2)))
             * hf * amp
-            + indent
+            + base_indent[fi]
         )
         mask = (t >= t_start) & (t <= (t_start + burst_len))
         stim_traces[fi, mask] = pulse[mask]
-    stim_trace = np.max(stim_traces, axis=0)
-    return Stimulus(trace=stim_trace,location=locs[0],fs=fs,pin_radius=pin_radius)
+    # Expand each indenter center to a multi-pin circular contact by default.
+    if pins_per_mm is not None and float(pins_per_mm) > 0 and float(indenter_radius) > 0:
+        loc_blocks = []
+        trace_blocks = []
+        for fi in range(n_fingers):
+            shp = shape_circle(radius=float(indenter_radius), pins_per_mm=float(pins_per_mm), center=center_locs[fi])
+            xy = np.asarray(shp, float)[:, :2]
+            loc_blocks.append(xy)
+            trace_blocks.append(np.tile(stim_traces[fi:fi + 1, :], (xy.shape[0], 1)))
+        locs = np.vstack(loc_blocks)
+        stim_traces = np.vstack(trace_blocks)
+    else:
+        locs = center_locs
+
+    return _make_stimulus(
+        trace=stim_traces, location=locs, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
+
+
+def stim_vcr_single_pulse(**args):
+    """Generates a single-finger burst with other fingers held at static indent.
+
+    This is a simplified, non-sequenced variant of stim_vcr:
+    - one active finger receives a single burst
+    - all listed fingers are present as indentors
+    - non-active fingers stay at baseline indent throughout
+
+    Kwargs:
+        freq (float): carrier frequency in Hz.
+        amp (float): burst amplitude in mm for active finger.
+        active_finger (str): finger that receives the burst (default: "D2").
+        fingers (list[str]): all fingers present as indentors
+            (default: ["D2","D3","D4","D5"]).
+        indent (float): default baseline indentation for all listed fingers (default: 0.0).
+        indent_map (dict[str, float] | None): per-finger baseline overrides.
+            Example: {"D2": 0.5, "D3": 0.1, "D4": 0.1, "D5": 0.1}
+        fs (float): sampling frequency in Hz (default: 5000).
+        burst_len (float): burst duration in s (default: 0.200).
+        delta (float): tanh pulse window duration in s (default: burst_len).
+        slope (float): tanh pulse slope (default: 1000).
+        edge_pad_len (float): padding before and after burst in s (default: 0.100).
+        pin_radius (float): probe radius in mm (default: 0.5).
+
+    Returns:
+        Stimulus object with multi-pin trace shape (N_fingers, T_samples).
+    """
+    freq = args.get('freq')
+    amp = args.get('amp')
+    active_finger = str(args.get('active_finger', 'D2')).upper()
+    fingers = args.get('fingers', ['D2', 'D3', 'D4', 'D5'])
+    indent = args.get('indent', 0.0)
+    indent_map = args.get('indent_map', None)
+    fs = args.get('fs', 5000)
+    burst_len = args.get('burst_len', 0.200)
+    delta = args.get('delta', burst_len)
+    slope = args.get('slope', 1000)
+    edge_pad = float(args.get('edge_pad_len', 0.100))
+    pin_radius = args.get('pin_radius', 2.5)
+    indenter_radius = args.get('indenter_radius', 2.5)
+    pins_per_mm = args.get('pins_per_mm', 2.0)
+
+    if freq is None or amp is None:
+        raise ValueError("stim_vcr_single_pulse requires 'freq' and 'amp'.")
+    if type(fingers) is not list:
+        fingers = list(fingers)
+    fingers = [str(f).upper() for f in fingers]
+    valid = {"D1", "D2", "D3", "D4", "D5"}
+    if len(fingers) == 0:
+        raise ValueError("stim_vcr_single_pulse requires at least one finger in `fingers`.")
+    if len(set(fingers)) != len(fingers):
+        raise ValueError("stim_vcr_single_pulse `fingers` entries must be unique.")
+    if any(f not in valid for f in fingers):
+        raise ValueError(f"stim_vcr_single_pulse `fingers` must be in {sorted(valid)}")
+    if active_finger not in fingers:
+        raise ValueError("stim_vcr_single_pulse `active_finger` must be included in `fingers`.")
+    if edge_pad < 0:
+        raise ValueError("stim_vcr_single_pulse `edge_pad_len` must be >= 0.")
+
+    n_fingers = len(fingers)
+    dt = 1 / fs
+    w = 2 * np.pi * freq
+    t_max = burst_len + 2 * edge_pad
+    t = np.linspace(0.0, t_max, int(t_max / dt) + 1)
+
+    # Per-finger baseline indentation.
+    base_indent = np.full(n_fingers, float(indent), dtype=float)
+    if indent_map is not None:
+        if not isinstance(indent_map, dict):
+            raise ValueError("stim_vcr_single_pulse `indent_map` must be a dict of {finger: indent_mm}.")
+        for k, v in indent_map.items():
+            kk = str(k).upper()
+            if kk in fingers:
+                base_indent[fingers.index(kk)] = float(v)
+
+    stim_traces = np.tile(base_indent[:, None], (1, t.size))
+    active_idx = fingers.index(active_finger)
+    t_start = edge_pad
+    t0 = t_start + burst_len / 2
+    hf = 0.5 * (1 + np.cos(w * (t - t0)))
+    pulse = (
+        0.5
+        * (np.tanh(slope * (t - t0 + delta / 2))
+           - np.tanh(slope * (t - t0 - delta / 2)))
+        * hf * amp
+        + base_indent[active_idx]
+    )
+    mask = (t >= t_start) & (t <= (t_start + burst_len))
+    stim_traces[active_idx, mask] = pulse[mask]
+
+    center_locs = np.array(
+        [
+            np.asarray(hand_surface.centers[hand_surface.tag2idx(f"{f}d")], dtype=float).reshape(-1, 2)[0]
+            for f in fingers
+        ],
+        dtype=float,
+    )
+
+    # Expand each indenter center to a multi-pin circular contact by default.
+    if pins_per_mm is not None and float(pins_per_mm) > 0 and float(indenter_radius) > 0:
+        loc_blocks = []
+        trace_blocks = []
+        for fi in range(n_fingers):
+            shp = shape_circle(radius=float(indenter_radius), pins_per_mm=float(pins_per_mm), center=center_locs[fi])
+            xy = np.asarray(shp, float)[:, :2]
+            loc_blocks.append(xy)
+            trace_blocks.append(np.tile(stim_traces[fi:fi + 1, :], (xy.shape[0], 1)))
+        locs = np.vstack(loc_blocks)
+        stim_traces = np.vstack(trace_blocks)
+    else:
+        locs = center_locs
+
+    return _make_stimulus(
+        trace=stim_traces, location=locs, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 
 def stim_burst(**args):
@@ -437,17 +689,29 @@ def stim_burst(**args):
     fs = args.get('fs', 5000)
     burst_len = args.get('burst_len', 0.100)
     cycle_len = args.get('cycle_len', 0.667 / 4.0)
-    delta = args.get('delta', 0.100)
+    # By default, make the tanh window width match the requested burst length
+    # so the high-amplitude vibration lasts exactly `burst_len` seconds.
+    delta = args.get('delta', burst_len)
     slope = args.get('slope', 1000)
     pin_radius = args.get('pin_radius', default_params['pin_radius'])
+    indenter_radius = args.get('indenter_radius', 2.5)
+    pins_per_mm = args.get('pins_per_mm', 2.0)
     loc = np.array(args.get(
         'loc',
-        ts.hand_surface.centers[ts.hand_surface.tag2idx('D2d')]
+        hand_surface.centers[hand_surface.tag2idx('D2d')]
     ))
     if freq is None or amp is None:
         raise ValueError("stim_burst requires 'freq' and 'amp'.")
     dt = 1 / fs
-    t_pad = cycle_len - burst_len
+    # Keep pre/post padding fixed to the baseline 100 ms burst design:
+    # pad = (T - 0.100) / 2, with T = cycle_len.
+    # Increasing burst_len only extends the active burst segment.
+    base_burst_len = 0.100
+    t_pad = (cycle_len - base_burst_len) / 2.0
+    if t_pad < 0:
+        raise ValueError(
+            "cycle_len is too short for baseline padding rule: require cycle_len >= 0.100"
+        )
     t_max = burst_len + 2 * t_pad
     w = 2 * np.pi * freq
     t = np.linspace(0.0, t_max, int(t_max / dt) + 1)
@@ -460,7 +724,16 @@ def stim_burst(**args):
         * hf * amp
         + indent
     )
-    return Stimulus(trace=stim,location=loc,fs=fs,pin_radius=pin_radius)
+    # enforce exact baseline before and after burst window
+    stim[(t < t_pad) | (t > (t_pad + burst_len))] = indent
+    base = _make_stimulus(
+        trace=stim, location=loc, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
+    if pins_per_mm is not None and float(pins_per_mm) > 0 and float(indenter_radius) > 0:
+        shp = shape_circle(radius=float(indenter_radius), pins_per_mm=float(pins_per_mm), center=np.asarray(loc).reshape(2))
+        return stim_indent_shape(shp, base, pin_radius=pin_radius)
+    return base
 
 
 def stim_multiple_bursts(**args):
@@ -511,11 +784,14 @@ def stim_multiple_bursts(**args):
         + indent
     )
     stim[(t < t_pad) | (t > (t_pad + burst_len))] = indent
-    loc1 = ts.hand_surface.centers[ts.hand_surface.tag2idx(f"{finger1}d")]
-    loc2 = ts.hand_surface.centers[ts.hand_surface.tag2idx(f"{finger2}d")]
+    loc1 = hand_surface.centers[hand_surface.tag2idx(f"{finger1}d")]
+    loc2 = hand_surface.centers[hand_surface.tag2idx(f"{finger2}d")]
     #single representative location to match Stimulus signature
     #using first finger for consistency
-    return Stimulus(trace=stim,location=loc1,fs=fs,pin_radius=pin_radius)
+    return _make_stimulus(
+        trace=stim, location=loc1, fs=fs, pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 def stim_indent_shape(shape,trace,**args):
     """Applies indentation trace to several pins that make up a shape.
@@ -538,6 +814,8 @@ def stim_indent_shape(shape,trace,**args):
             args['fs'] = trace.fs
         if 'pin_radius' not in args:
             args['pin_radius'] = trace.pin_radius
+        if 'backend' not in args and 'transduction' not in args:
+            args['backend'] = trace.backend
     else:
         t = np.reshape(np.atleast_2d(trace),(1,-1))
 
@@ -549,7 +827,15 @@ def stim_indent_shape(shape,trace,**args):
     if args.pop('rectify',True):
         t[t<0] = 0
 
-    return Stimulus(trace=t,location=shape[:,0:2],**args)
+    fs = args.pop('fs', default_params['fs'])
+    pin_radius = args.pop('pin_radius', default_params['pin_radius'])
+    return _make_stimulus(
+        trace=t,
+        location=shape[:, 0:2],
+        fs=fs,
+        pin_radius=pin_radius,
+        **_backend_kwargs_from_args(args),
+    )
 
 
 def shape_bar(**args):

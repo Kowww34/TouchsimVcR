@@ -1,3 +1,11 @@
+"""
+HoloViews plotting for TouchSim objects.
+
+Use ``plot(obj)`` for ``AfferentPopulation``, ``Stimulus``, ``Response``, or
+``Surface``, and ``figsave(hv_obj, path)`` to write PNG/GIF. Also exported as
+``touchsim.plot`` from the package root.
+"""
+
 import holoviews as hv
 import re
 import numpy as np
@@ -65,7 +73,7 @@ def plot_afferent_population(obj,**args):
     for a in Afferent.affclasses:
         p = hv.Points(
             obj.surface.hand2pixel(obj.location[obj.find(a),:]))
-        points[a] = p.opts(aspect='equal', color=tuple(Afferent.affcol[a]), size=size)
+        points[a] = p.opts(aspect='equal', color=tuple(Afferent.affcol[a]), s=size)
     return hv.NdOverlay(points)
 
 def plot_stimulus(obj,**args):

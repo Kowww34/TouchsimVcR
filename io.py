@@ -45,16 +45,17 @@ Response Dictionary Schema
 Binary-loaded responses (and filter inputs) follow this structure:
 
     resp = {
-        "spikes":      list[np.ndarray],   # length N (one per afferent)
-        "location":    np.ndarray (N, 2),
-        "class_str":   np.ndarray (N,),    # e.g., "PC", "RA", "SA1"
-        "idx":         np.ndarray (N,),    # afferent indices
-        "region_str":  np.ndarray (N,)     # region labels
+        "spikes":       list[np.ndarray],   # length N (one per afferent)
+        "location":     np.ndarray (N, 2),
+        "class_str":    np.ndarray (N,),    # e.g., "PC", "RA", "SA1"
+        "idx":          np.ndarray (N,),    # afferent indices
+        "region_str":   np.ndarray (N,)     # region labels
     }
 
-Optional (if present):
+Binary files store spikes in CSR form; after ``load`` these are also exposed as:
+
         "spike_times":  np.ndarray (total_spikes,)
-        "spike_indptr": np.ndarray (N+1,)   # CSR layout
+        "spike_indptr": np.ndarray (N+1,)
 
 
 Filtering Behavior
@@ -89,9 +90,7 @@ Typical Usage
 
     #filter by class and region
     r_pc = filter_response(r, classes="PC", regions="D2")
-
-    #chain filters
-    r_subset = filter_response(r_pc, ids=[1, 2, 3])
+    r_pc_subset = filter_response(r_pc, ids=[1, 2, 3])
 
 """
 
@@ -99,6 +98,7 @@ from __future__ import annotations
 
 import pickle
 from pathlib import Path
+from collections.abc import Callable, Iterable
 from typing import Any, Literal, Protocol
 
 import numpy as np
@@ -107,7 +107,10 @@ from numpy.typing import NDArray
 
 #public type aliases
 ObjectKind = Literal["affpop", "stimulus", "response"]
-SaveFormat = Literal["auto", "pickle", "binary"]
+SaveFormat = Literal["pickle", "binary"]
+FormatArg = Literal["pickle", "binary", "auto"]
+StrSel = str | Iterable[str] | Callable[[str], bool] | None
+IntSel = int | Iterable[int] | Callable[[int], bool] | None
 
 
 #minimal protocols so editors/type checkers know what is expected
@@ -142,8 +145,8 @@ def save(
     obj: Any,
     kind: ObjectKind,
     path: str | Path,
-    format: SaveFormat = "auto",
-) -> Path:
+    format: FormatArg = "auto",
+):
     """
     Parameters
     ----------
@@ -165,13 +168,6 @@ def save(
             - "pickle" : save the full Python object with pickle
             - "binary" : save a compact NumPy-based representation
 
-    Returns
-    -------
-    Path
-        The resolved output path.
-
-    Notes
-    -----
     Current defaults:
     - responses -> binary
     - affpop/stimulus -> pickle
@@ -209,10 +205,30 @@ def save(
     raise ValueError(f"unsupported save request: kind={kind!r}, format={format!r}")
 
 
+def convert(resp: _ResponseProtocol) -> dict[str, Any]:
+    spikes = resp.spikes
+    location = np.asarray(resp.aff.location, dtype=np.float32)
+    class_str = np.asarray(list(resp.aff.affclass), dtype="U8")
+    idx = np.asarray([a.idx for a in resp.aff.afferents], dtype=np.int32)
+    n = len(idx)
+    region_tags, _ = resp.aff.region
+    region_str = np.asarray(
+        list(map(str, region_tags)) if region_tags is not None else [""] * n,
+        dtype="U32",
+    )
+
+    return {
+        "spikes": spikes,
+        "location": location,
+        "class_str": class_str,
+        "idx": idx,
+        "region_str": region_str,
+    }
+
 def load(
     path: str | Path,
     kind: ObjectKind | None = None,
-    format: SaveFormat = "auto",
+    format: FormatArg = "auto",
 ) -> Any:
     """
     Load an object from disk.
@@ -341,6 +357,34 @@ def _load_pickle(path: Path) -> Any:
 #========================
 #binary response backend
 #========================
+def _spike_lists_to_csr(
+    sp_list: list[Any],
+) -> tuple[NDArray[np.float32], NDArray[np.int64]]:
+    """CSR encoding of per-afferent spike time lists (float32 times)."""
+    lengths = np.fromiter((len(a) for a in sp_list), dtype=np.int64, count=len(sp_list))
+    indptr = np.empty(len(sp_list) + 1, dtype=np.int64)
+    indptr[0] = 0
+    np.cumsum(lengths, out=indptr[1:])
+    nonempty = [np.asarray(a, dtype=np.float32) for a in sp_list if len(a)]
+    spike_times = (
+        np.concatenate(nonempty) if nonempty else np.empty(0, dtype=np.float32)
+    )
+    return spike_times, indptr
+
+
+def _csr_to_spike_lists(
+    spike_times: NDArray[Any], indptr: NDArray[Any]
+) -> list[NDArray[np.float32]]:
+    """Decode CSR spike storage into one float32 array per afferent."""
+    st = np.asarray(spike_times, dtype=np.float32)
+    ip = np.asarray(indptr, dtype=np.int64)
+    out: list[NDArray[np.float32]] = []
+    for i in range(len(ip) - 1):
+        lo, hi = int(ip[i]), int(ip[i + 1])
+        out.append(st[lo:hi].copy())
+    return out
+
+
 def _save_response_binary(resp: _ResponseProtocol, path: Path) -> None:
     """
     Save a response object to a compact `.npz` file.
@@ -348,11 +392,10 @@ def _save_response_binary(resp: _ResponseProtocol, path: Path) -> None:
     Stored arrays
     -------------
     spike_times : float32, shape (total_spikes,)
-        Concatenated spike times for all afferents.
+        Concatenated spike times for all afferents (CSR values).
 
-    spike_indptr : int64, shape (N+1,)
-        CSR-style pointer array where spikes for afferent `i` live in:
-            spike_times[spike_indptr[i] : spike_indptr[i+1]]
+    spike_indptr : int64, shape (N + 1,)
+        CSR index pointers, one row per afferent.
 
     location : float32, shape (N, 2)
         Afferent x/y locations.
@@ -366,33 +409,14 @@ def _save_response_binary(resp: _ResponseProtocol, path: Path) -> None:
     region_str : unicode, shape (N,)
         Region labels.
 
-    Why CSR?
-    --------
-    A Python list of spike arrays is convenient in memory, but wasteful on disk.
-    Flattening to `spike_times + spike_indptr` avoids pickling thousands of
-    tiny arrays and is usually much more compact.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    n = len(resp)
-
-    indptr = np.zeros(n + 1, dtype=np.int64)
-    chunks: list[NDArray[np.float32]] = []
-
-    for i, spike_train in enumerate(resp.spikes):
-        arr = np.asarray(spike_train, dtype=np.float32)
-        indptr[i + 1] = indptr[i] + arr.size
-        if arr.size:
-            chunks.append(arr)
-
-    spike_times = (
-        np.concatenate(chunks) if chunks else np.empty(0, dtype=np.float32)
-    )
-
+    sp_list = resp.spikes
+    spike_times, spike_indptr = _spike_lists_to_csr(sp_list)
     location = np.asarray(resp.aff.location, dtype=np.float32)
     class_str = np.asarray(list(resp.aff.affclass), dtype="U8")
     idx = np.asarray([a.idx for a in resp.aff.afferents], dtype=np.int32)
-
+    n = len(idx)
     region_tags, _ = resp.aff.region
     region_str = np.asarray(
         list(map(str, region_tags)) if region_tags is not None else [""] * n,
@@ -402,7 +426,7 @@ def _save_response_binary(resp: _ResponseProtocol, path: Path) -> None:
     np.savez_compressed(
         path,
         spike_times=spike_times,
-        spike_indptr=indptr,
+        spike_indptr=spike_indptr,
         location=location,
         class_str=class_str,
         idx=idx,
@@ -419,6 +443,8 @@ def _load_response_binary(path: Path) -> dict[str, Any]:
     dict
         Dictionary with keys:
             - "spikes"
+            - "spike_times"
+            - "spike_indptr"
             - "location"
             - "class_str"
             - "idx"
@@ -430,16 +456,18 @@ def _load_response_binary(path: Path) -> dict[str, Any]:
     because that is often the easiest structure to work with in analysis code.
     """
     with np.load(path, allow_pickle=False) as z:
-        spike_times: NDArray[np.float32] = z["spike_times"]
-        indptr: NDArray[np.int64] = z["spike_indptr"]
-
-        spikes = [
-            spike_times[indptr[i] : indptr[i + 1]]
-            for i in range(len(indptr) - 1)
-        ]
-
+        if "spike_times" not in z.files or "spike_indptr" not in z.files:
+            raise ValueError(
+                "response .npz must contain 'spike_times' and 'spike_indptr' "
+                "(CSR layout). Older files are not supported."
+            )
+        spike_times = z["spike_times"]
+        spike_indptr = z["spike_indptr"]
+        spikes = _csr_to_spike_lists(spike_times, spike_indptr)
         return {
             "spikes": spikes,
+            "spike_times": spike_times,
+            "spike_indptr": spike_indptr,
             "location": z["location"],
             "class_str": z["class_str"],
             "idx": z["idx"],
@@ -451,9 +479,23 @@ def _load_response_binary(path: Path) -> dict[str, Any]:
 #========================
 #Filtering helpers
 #========================
+def _as_set(x):
+    if x is None or isinstance(x, (str, int, np.integer)):
+        return {x} if x is not None else None
+    return set(x)
+
+def _normalize_pred(arr, sel):
+    n = len(arr)
+    if sel is None:
+        return np.ones(n, dtype=bool)
+    if callable(sel):
+        return np.fromiter((bool(sel(v)) for v in arr), dtype=bool, count=n)
+    s = _as_set(sel)
+    return np.fromiter((v in s for v in arr), dtype=bool, count=n)
+
 def _region_mask(
     region_labels: Iterable[Any],
-    selector: str | Iterable[str] | None,
+    selector: StrSel,
 ) -> NDArray[np.bool_]:
     """
     Build boolean mask for region selection.
@@ -468,6 +510,13 @@ def _region_mask(
 
     if selector is None:
         return np.ones(n, dtype=bool)
+
+    if callable(selector):
+        return np.fromiter(
+            (bool(selector(str(lbl))) for lbl in labels),
+            dtype=bool,
+            count=n,
+        )
 
     # Normalize to list of strings
     sels: list[str] = [selector] if isinstance(selector, str) else list(selector)
@@ -514,11 +563,9 @@ def filter_response(
         if k not in resp:
             raise KeyError(f"resp lacks '{k}' needed for filtering.")
 
-    m_class  = _normalize_pred(resp["class_str"],  classes)
-    #custom region matcher with D2 → all D2* behavior
+    m_class = _normalize_pred(resp["class_str"], classes)
     m_region = _region_mask(resp["region_str"], regions)
-    #this line was missing in your erroring version:
-    m_idx    = _normalize_pred(resp["idx"],       ids)
+    m_idx = _normalize_pred(resp["idx"], ids)
 
     mask = (m_class | m_region | m_idx) if logic == "or" else (m_class & m_region & m_idx)
     sel = np.flatnonzero(mask)
@@ -541,13 +588,7 @@ def filter_response(
 
     #rebuild CSR for the subset if original had it
     if had_csr:
-        sp_list = out["spikes"]
-        lengths = np.fromiter((len(a) for a in sp_list), dtype=np.int64, count=len(sp_list))
-        indptr = np.empty(len(sp_list) + 1, dtype=np.int64)
-        indptr[0] = 0
-        np.cumsum(lengths, out=indptr[1:])
-        nonempty = [np.asarray(a, dtype=np.float32) for a in sp_list if len(a)]
-        st = np.concatenate(nonempty) if nonempty else np.empty(0, dtype=np.float32)
+        st, indptr = _spike_lists_to_csr(out["spikes"])
         out["spike_times"] = st
         out["spike_indptr"] = indptr
 

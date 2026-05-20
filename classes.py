@@ -1,11 +1,27 @@
+"""
+Core TouchSim object model.
+
+Defines ``Afferent``, ``AfferentPopulation``, ``Stimulus``, and ``Response``.
+Stimuli select a mechanical backend (``orig``, ``cutoff``, ``lag``) via the
+``backend`` keyword (alias ``transduction``). The choice routes profile
+computation and stress propagation through ``touchsim.transduction``.
+"""
+
 import numpy as np
 import random
 import warnings
 from math import isclose
 from scipy.signal import resample
 
-from .transduction import skin_touch_profile, circ_load_vert_stress,\
-    circ_load_dyn_wave, lif_neuron, check_pin_radius
+from . import transduction
+from .transduction import (
+    check_pin_radius,
+    circ_load_dyn_wave,
+    circ_load_vert_stress,
+    lif_neuron,
+    normalize_backend,
+    skin_touch_profile,
+)
 from . import constants
 from .surface import null_surface, hand_surface
 
@@ -75,136 +91,6 @@ class Afferent(object):
     @property
     def gid(self):
         return np.asarray([Afferent.affclasses.index(self.affclass), self.idx])
-
-    @property
-    def region(self):
-        return self.surface.locate(self.location)
-
-    def __add__(self,other):
-        if type(other) is Afferent:
-            return AfferentPopulation(self,other)
-        elif type(other) is AfferentPopulation:
-            return AfferentPopulation(self,*other.afferents)
-        else:
-            RuntimeError("Can only add elements of type Afferent or AfferentPopulation.")
-        return self
-
-    def response(self,stim):
-        """Calculates the afferent's spiking response to a tactile stimulus.
-
-        Args:
-            stim (Stimulus object): The tactile stimulus.
-
-        Returns:
-            Response object.
-        """
-        return AfferentPopulation(self).response(stim)
-    """A single afferent, which can be placed on a surface and respond to tactile
-    stimuli.
-    """
-    affclasses = constants.affclasses
-    affdepths = constants.affdepths
-    #afffits = constants.afffits
-    affcol = constants.affcol
-
-    def __init__(self,affclass,**args):
-        """Initializes an Afferent object.
-
-        Args:
-            affclass (string): Afferent class, one of 'SA1', 'RA', or 'PC'.
-
-        Kwargs:
-            location (array): Location of the afferent (default: [0,0]).
-            noisy (bool): Injects noise into membrane potential (default: True).
-            delay (bool) = Adds delays to mimic travel to neural recording site
-                (default: False).
-            surface (Surface object): The surface on which Afferent is located
-                (default: null_surface).
-            depth (float) = Depth of afferent in the skin (default: standard depth
-                depening on afferent class).
-            idx (int): ID number of neuron model (default: randomly chosen).
-            C (float): scales the randomness of the afferent parameters
-            Option (int): option 1 - PCA fit performed including parameter 9 (added noise)
-                          option 2 - PCA fit performed exclusing parameter 9 and parameter 9 set to zero
-        """
-        self.affclass = affclass
-        self.location = np.atleast_2d(args.get('location',np.array([[0., 0.]])))
-        self.depth = args.get('depth',None)
-        self.noisy = args.get('noisy',True)
-        self.delay = args.get('delay',False)
-        self.surface = args.get('surface',null_surface)
-        self.C = args.get('C', 1)
-        self.option = args.get('option', 1)
-
-        if self.depth is None:   # Set afferent depth
-            self.depth = RandomAfferent.affdepths.get(self.affclass)
-
-        if self.option == 1:
-            from .constants import SA_pca1 as SA_pca, RA_pca1 as RA_pca, PC_pca1 as PC_pca
-            from .constants import SA_scaler1 as SA_scaler, RA_scaler1 as RA_scaler, PC_scaler1 as PC_scaler
-
-        elif self.option == 2:
-            from .constants import SA_pca2 as SA_pca, RA_pca2 as RA_pca, PC_pca2 as PC_pca
-            from .constants import SA_scaler2 as SA_scaler, RA_scaler2 as RA_scaler, PC_scaler2 as PC_scaler
-        
-        if affclass == 'SA1':
-            fuzzy_point = np.column_stack([np.random.normal(0, self.C*constants.SA_sigma_x1, 1),
-                                        np.random.normal(0, self.C*constants.SA_sigma_y1, 1),
-                                        *[np.zeros((1,)) for _ in range(2)]])
-            partial_parameters = SA_pca.inverse_transform(fuzzy_point)
-            partial_parameters = SA_scaler.inverse_transform(partial_parameters)
-            p = np.insert(partial_parameters, [5, 5, 5], [0.0, 0.0, 0.0], axis=1)
-            if self.option == 2:
-                p = np.insert(p, [8], [0.0], axis=1)
-            
-        elif affclass == 'RA':
-            fuzzy_point = np.column_stack([
-                np.random.normal(0, self.C * constants.RA_sigma_x1, 1),
-                np.random.normal(0, self.C * constants.RA_sigma_y1, 1),
-                *[np.zeros((1,)) for _ in range(7)]])
-            partial_parameters = RA_pca.inverse_transform(fuzzy_point)
-            partial_parameters = RA_scaler.inverse_transform(partial_parameters)
-            p = np.insert(partial_parameters, [1, 1], [0.0, 0.0], axis=1)
-            if self.option == 2:
-                p = np.insert(p, [8], [0.0], axis=1)
-        
-        elif affclass == 'PC':
-            fuzzy_point = np.column_stack([
-                np.random.normal(0, self.C * constants.PC_sigma_x1, 1),
-                np.random.normal(0, self.C * constants.PC_sigma_y1, 1),
-                *[np.zeros((1,)) for _ in range(2)]])
-            partial_parameters = PC_pca.inverse_transform(fuzzy_point)
-            partial_parameters = PC_scaler.inverse_transform(partial_parameters)
-            p = np.insert(partial_parameters, [1, 1], [0.0, 0.0], axis=1)
-            if self.option == 2:
-                p = np.insert(p, [8], [0.0], axis=1)
-        
-        self.parameters = p[0].copy()
-
-        if not self.delay:
-            self.parameters[12] = 0.
-
-    def __str__(self):
-        return 'Afferent of class ' + self.affclass + ' (gid: ' +\
-            str(self.gid) + ').'
-
-    def __len__(self):
-        return 1
-
-    @property
-    def affclass(self):
-        return self._affclass
-
-    @affclass.setter
-    def affclass(self,affclass):
-        if not affclass in Afferent.affclasses:
-            raise IOError("Afferent class must be one of " + \
-                ", ".join(Afferent.affclasses) + ".")
-        self._affclass = affclass
-
-    @property
-    def gid(self):
-        return np.asarray([Afferent.affclasses.index(self.affclass)])
 
     @property
     def region(self):
@@ -398,12 +284,38 @@ class Stimulus(object):
             location (Nx2 array) = np.atleast_2d(args.get('location',np.array([[0., 0.]])))
             fs (float): Sampling frequency (default: 1000.).
             pin_radius (float): Pin radius in mm (default: 0.05).
+            backend (str): Mechanical backend, one of 'orig', 'cutoff', 'lag'
+                (default: 'orig'). Alias: ``transduction``.
         """
         self.trace = np.atleast_2d(args.get('trace',np.array([[]])))
         self.location = np.atleast_2d(args.get('location',np.array([[0., 0.]])))
         self.fs = args.get('fs',1000.)
         self.pin_radius = args.get('pin_radius',.05)
+        self._set_backend(
+            backend=args.get('backend'),
+            transduction_name=args.get('transduction'),
+        )
         self.compute_profile()
+
+    def _set_backend(self, backend=None, transduction_name=None):
+        if backend is not None and transduction_name is not None:
+            if normalize_backend(backend) != normalize_backend(transduction_name):
+                raise ValueError(
+                    f"backend={backend!r} conflicts with transduction={transduction_name!r}"
+                )
+            name = backend
+        else:
+            name = backend if backend is not None else transduction_name
+            if name is None:
+                name = "orig"
+        self.backend = normalize_backend(name)
+        self.transduction = self.backend
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        if not hasattr(self, "backend"):
+            self.backend = normalize_backend(getattr(self, "transduction", "orig"))
+        self.transduction = self.backend
 
     def __str__(self):
         return 'Stimulus with ' + str(self.location.shape[0]) +\
@@ -429,6 +341,11 @@ class Stimulus(object):
             raise RuntimeError("Sampling frequencies must be the same.")
         if self.duration!=other.duration:
             raise RuntimeError("Stimulus durations must be the same.")
+        if self.backend != other.backend:
+            raise ValueError(
+                "Cannot combine stimuli with different backends "
+                f"({self.backend!r} vs {other.backend!r})."
+            )
 
         self.trace = np.concatenate([self.trace,other.trace])
         self.location = np.concatenate([self.location,other.location])
@@ -439,14 +356,19 @@ class Stimulus(object):
         """Computes surface profile over time. This method is executed
         automatically whenever the 'trace' property changes.
         """
-        new_radius = check_pin_radius(self.location,self.pin_radius)
+        new_radius = check_pin_radius(self.location, self.pin_radius)
         if self.pin_radius>new_radius:
             warnings.warn(
                 "Pin radius too big and has been adjusted to %.1f" % new_radius)
             self.pin_radius = new_radius
 
         self._profile, self._profiledyn = skin_touch_profile(
-            self.trace,self.location,self.fs,self.pin_radius)
+            self.trace,
+            self.location,
+            self.fs,
+            self.pin_radius,
+            backend=self.backend,
+        )
 
     def strain(self, region="D2", surface=hand_surface,
             affclass='PC', depth=None, component='static'):
@@ -548,7 +470,13 @@ class Stimulus(object):
             mechanical component, and the sampling rate.
         """
         stat_comp = circ_load_vert_stress(
-            self._profile,self.location,self.pin_radius,aff.location,aff.depth)
+            self._profile,
+            self.location,
+            self.pin_radius,
+            aff.location,
+            aff.depth,
+            backend=self.backend,
+        )
         dyn_comp = circ_load_dyn_wave(
             self._profiledyn,self.location,self.pin_radius,aff.location,
                 aff.depth,self.fs,aff.surface)

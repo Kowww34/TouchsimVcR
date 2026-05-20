@@ -25,11 +25,11 @@ Responses can be stored as compact binary files using a CSR spike representation
 
 ### Response filtering
 
-The function filter_response allows efficient sub selection of afferents from a response dictionary. Filtering can be performed using afferent class, region, or index. Region filtering supports prefix matching such as using D2 to select all D2 related regions. The function is chainable and preserves the structure of the response.
+The function filter_response allows efficient sub selection of afferents from a response dictionary. Filtering can be performed using afferent class, region, or index. Region filtering supports prefix matching such as using D2 to select all D2 related regions. The function is chainable and preserves the dictionary structure of the response.
 
 ### Analysis tools
 
-The repository includes tools for time resolved firing rate estimation, synchrony metrics such as the order parameter, spike to phase mapping, spatial grouping using nearest neighbor methods, and visualization of afferent activity across the hand. These tools are intended to bridge peripheral responses with downstream modeling and analysis.
+The repository includes tools for time resolved firing rate estimation, synchrony metrics such as the order parameter, spike/phase mapping, spatial grouping using nearest neighbor methods, and visualization of afferent activity across the hand. These tools are intended to bridge peripheral responses with downstream modeling and analysis.
 
 ### Static strain and distance bug fix
 
@@ -37,7 +37,11 @@ The original TouchSim implementation uses Euclidean distance to compute interact
 
 Two fixes are implemented.
 
-The first fix introduces a propagation cutoff. Interactions beyond a specified distance are set to zero. This removes long range non physical coupling and enforces locality, although it introduces a hard cutoff.
+1) The first fix introduces a propagation cutoff. Interactions beyond a specified distance are set to zero. This removes long range non physical coupling and enforces locality, although it introduces a hard cutoff. Dynamic pressure transmission, which was originally coded with delay is unaffected.
 
-The second fix introduces a propagation delay proportional to distance. Static strain contributions are shifted in time according to tau equals distance divided by velocity. This changes the behavior from instantaneous coupling to wave like propagation and improves physical realism.
+2) The second fix introduces a propagation delay proportional to distance. Static strain contributions are shifted in time according to tau equals distance divided by velocity. This changes the behavior from instantaneous coupling to wave like propagation and improves physical realism.
+
+Mechanical backend is selected per stimulus: ``stim_sine(..., transduction='lag')``
+(one of ``orig``, ``cutoff``, ``lag``). Defaults to ``cutoff``. Cutoff radii are
+configured via ``touchsim.transduction.set_distance_cutoffs_mm``.
 

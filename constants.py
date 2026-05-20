@@ -1,5 +1,12 @@
+"""
+Static parameters for TouchSim afferent classes and hand layout.
+
+Provides per-class depths, LIF parameter tables, Ih basis, hand region tags,
+and default sampling densities referenced by ``classes``, ``transduction``,
+and ``surface``.
+"""
+
 import numpy as np
-import pandas as pd
 
 affclasses = ['SA1','RA','PC']
 
@@ -80,8 +87,8 @@ affparamsPC = np.array([[27.50213623046875, 0., 0., -257.79678911169367, -185.65
                     4.7331220358610153, -6.1505432367324815, -0.2100401371717453,
                     3.6196996516799924]])
 
-
-
+# parameters dictionary
+affparams = {'SA1':affparamsSA,'RA':affparamsRA,'PC':affparamsPC}
 
 affcol = {'SA1':[0.1961,0.6275,0.1569],'RA':[0.1176,0.4706,0.7059],'PC':[1.0000,0.4980,0.]}
 
